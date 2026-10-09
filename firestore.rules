@@ -1,0 +1,129 @@
+rules_version = '2';
+
+// ── Workshop Gameroom security rules ─────────────────────────
+// Paste this whole file into Firebase console → Firestore Database →
+// Rules, then click Publish.
+//
+// What it allows:
+//   • Only visitors with a guest ID (anonymous sign-in) can do anything.
+//   • Anyone can see game rooms (that's how the tap-to-join lobby works).
+//   • You can only CREATE a room with yourself as host and only player.
+//   • You can JOIN a waiting room by adding only yourself, up to the
+//     game's player limit, with a nickname of 16 characters or less.
+//   • Only players in a room can change it during the game.
+//   • The host can close their room; anyone can delete a room that's
+//     more than a day old (that's the automatic cleanup).
+//   • Everything else in the database is locked.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function me() {
+      return request.auth.uid;
+    }
+
+    function nowMs() {
+      return request.time.toMillis();
+    }
+
+    // Shape every room must keep, whatever the game.
+    function validRoom(d, maxPlayers) {
+      return d.players is list
+        && d.players.size() >= 1
+        && d.players.size() <= maxPlayers
+        && d.host is string
+        && d.playerNames is map
+        && d.createdAt is number
+        && d.createdAt < nowMs() + 300000;
+    }
+
+    function goodName(d) {
+      return d.playerNames[me()] is string
+        && d.playerNames[me()].size() >= 2
+        && d.playerNames[me()].size() <= 16;
+    }
+
+    function creatingOwnRoom(maxPlayers) {
+      let d = request.resource.data;
+      return signedIn()
+        && validRoom(d, maxPlayers)
+        && d.host == me()
+        && d.players == [me()]
+        && d.status == "waiting"
+        && goodName(d)
+        && d.createdAt > nowMs() - 300000;
+    }
+
+    // Joining = adding ONLY yourself to a room that hasn't started.
+    function joiningRoom(maxPlayers) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return signedIn()
+        && before.status == "waiting"
+        && !(me() in before.players)
+        && after.players == before.players.concat([me()])
+        && validRoom(after, maxPlayers)
+        && goodName(after)
+        && after.diff(before).affectedKeys()
+             .hasOnly(["players", "playerNames", "scores", "cards"]);
+    }
+
+    // Playing = you're already in the room. The host can't be swapped.
+    function playingInRoom(maxPlayers) {
+      return signedIn()
+        && me() in resource.data.players
+        && validRoom(request.resource.data, maxPlayers)
+        && request.resource.data.host == resource.data.host;
+    }
+
+    function canDelete() {
+      return signedIn()
+        && (resource.data.host == me()
+            || resource.data.createdAt < nowMs() - 86400000);
+    }
+
+    match /switcherooGames/{roomId} {
+      allow read: if signedIn();
+      allow create: if creatingOwnRoom(6);
+      allow update: if joiningRoom(6) || playingInRoom(6);
+      allow delete: if canDelete();
+    }
+
+    match /matchingGames/{roomId} {
+      allow read: if signedIn();
+      allow create: if creatingOwnRoom(4);
+      allow update: if joiningRoom(4) || playingInRoom(4);
+      allow delete: if canDelete();
+    }
+
+    match /bingoGames/{roomId} {
+      allow read: if signedIn();
+      allow create: if creatingOwnRoom(12);
+      allow update: if joiningRoom(12) || playingInRoom(12);
+      allow delete: if canDelete();
+    }
+
+    match /checkersGames/{roomId} {
+      allow read: if signedIn();
+      allow create: if creatingOwnRoom(2);
+      allow update: if joiningRoom(2) || playingInRoom(2);
+      allow delete: if canDelete();
+    }
+
+    match /dominoesGames/{roomId} {
+      allow read: if signedIn();
+      allow create: if creatingOwnRoom(4);
+      allow update: if joiningRoom(4) || playingInRoom(4);
+      allow delete: if canDelete();
+    }
+
+    // Anything not listed above is off-limits.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
